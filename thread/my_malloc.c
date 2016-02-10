@@ -117,12 +117,12 @@ inline void set_size(metadata_t *mt, size_t s) {
 }
 
 void delete_node(metadata_t *node, bool need_lock) {
-	assert(is_free(node));
 	size_t space = meta_size(node);
 	int idx = array_idx(space);
 	if (need_lock) {
 		pthread_mutex_lock(&arr_mutex[idx]);
 	}
+	assert(is_free(node));
 	if (!node->prev && !node->next) {
 		freelist_arr[idx] = NULL;
 	}
@@ -143,18 +143,18 @@ void delete_node(metadata_t *node, bool need_lock) {
 	}
 	set_alloc(node);
 	set_alloc((metadata_t *)to_footer(to_block(node)));
+	assert(!is_free(node));
 	if (need_lock) {
 		pthread_mutex_unlock(&arr_mutex[idx]);
 	}
-	assert(!is_free(node));
 }
 
 void add_node(metadata_t *node, bool need_lock) {
-	assert(!is_free(node));
 	int idx = array_idx(meta_size(node));
 	if (need_lock) {
 		pthread_mutex_lock(&arr_mutex[idx]);
 	}
+	assert(!is_free(node));
 	if (!freelist_arr[idx]) {
 		freelist_arr[idx] = node;
 		node->prev = NULL;
@@ -168,10 +168,11 @@ void add_node(metadata_t *node, bool need_lock) {
 	}
 	set_free(node);
 	set_free((metadata_t *)to_footer(to_block(node)));
+	assert((metadata_t *)to_footer(to_block(node)));
+	assert(is_free(node));
 	if (need_lock) {
 		pthread_mutex_unlock(&arr_mutex[idx]);
 	}
-	assert(is_free(node));
 }
 
 metadata_t * find_fit(size_t space) {
@@ -181,8 +182,13 @@ metadata_t * find_fit(size_t space) {
 	metadata_t *result = NULL;
 	while (idx < ARRAY_SIZE) {
 		pthread_mutex_lock(&arr_mutex[idx]);
+
 		flpt = freelist_arr[idx];
 		while (flpt) {
+			assert(is_free(flpt));
+			assert(array_idx(meta_size(flpt)) == idx);
+
+
 			if (meta_size(flpt) == space) {
 				result = flpt;
 				break;
@@ -200,6 +206,8 @@ metadata_t * find_fit(size_t space) {
 		idx++;
 	}
 	if (result) {
+		assert(array_idx(meta_size(result)) == idx);
+		assert(is_free(result));
 		delete_node(result, false);
 		pthread_mutex_unlock(&(arr_mutex[idx]));
 	}
@@ -275,6 +283,7 @@ metadata_t * extend_heap(size_t space) {
 		footer_t *end2 = to_footer(to_block(start2));
 		set_alloc((metadata_t *)end2);
 		set_size((metadata_t *)end2, space2);
+		//////////////////////////////////////////////////////////////
 		add_node(start2, true);
 		extend_times += 1;
 	pthread_mutex_unlock(&sbrk_mutex);
@@ -298,21 +307,23 @@ void* dmalloc(size_t numbytes) {
 	}
 	else {
 		rest = rest - META_SIZE - FOOTER_SIZE;
-		pthread_mutex_lock(&arr_mutex[array_idx(space)]); 
+		// flpt and new flpt share the metadata, flpt and newmt shre the same footer
+		// pthread_mutex_lock(&arr_mutex[array_idx(space)]); 
 			set_size(flpt, space);
 			set_alloc(flpt);
 			set_size((metadata_t *)(to_footer(to_block(flpt))), space);
 			set_alloc((metadata_t *)(to_footer(to_block(flpt))));
 			metadata_t* newmt = (metadata_t *)((void *)flpt + META_SIZE + space + FOOTER_SIZE);
-		pthread_mutex_unlock(&arr_mutex[array_idx(space)]);
+		// pthread_mutex_unlock(&arr_mutex[array_idx(space)]);
 
-		pthread_mutex_lock(&arr_mutex[array_idx(rest)]); 
+		// pthread_mutex_lock(&arr_mutex[array_idx(rest)]); 
 			set_size(newmt, rest);
 			set_alloc(newmt);
 			set_size((metadata_t *)to_footer(to_block(newmt)), rest);
 			set_alloc((metadata_t *)to_footer(to_block(newmt)));
-			add_node(newmt, false);
-		pthread_mutex_unlock(&arr_mutex[array_idx(rest)]);
+			assert(!is_free(newmt));
+			add_node(newmt, true);
+		// pthread_mutex_unlock(&arr_mutex[array_idx(rest)]);
 	}
 	return to_block(flpt);
 }
@@ -327,48 +338,62 @@ void dfree(void* ptr) {
 	metadata_t *mt = to_meta(ptr);
 	assert(!is_free(mt));
 	int left_idx = array_idx(meta_size((metadata_t *)(ptr - META_SIZE - FOOTER_SIZE)));
+	// perhaps context switch now!
 	pthread_mutex_lock(&arr_mutex[left_idx]); 
+		int left_size = meta_size(left_block(mt));
 		if (is_free((metadata_t *)(ptr - META_SIZE - FOOTER_SIZE)) && 
-			(left_idx == array_idx(meta_size((metadata_t *)(ptr - META_SIZE - FOOTER_SIZE))))) {
+			(left_idx == array_idx(meta_size((metadata_t *)(ptr - META_SIZE - FOOTER_SIZE)))))
+		{
+			// assert(left_size == meta_size(left_block(mt)));
+			assert(is_free(left_block(mt)));
 			delete_node(left_block(mt), false);
+		// assume block 1 2 (3) 4 5, block 3 is current
+		// if left index of 2 is wrong, it must be coalesced by 1, so must read through foot
 			left_f = true;
 		}
 	pthread_mutex_unlock(&arr_mutex[left_idx]);
-
+		
+	
 	int right_idx = array_idx(meta_size(right_block(mt)));
 	pthread_mutex_lock(&arr_mutex[right_idx]);
-		if (is_free(right_block(mt))
-			&& (right_idx == array_idx(meta_size(right_block(mt)))))
+		int right_size = meta_size(right_block(mt));
+		if (is_free(right_block(mt)) && 
+			(right_idx == array_idx(meta_size(right_block(mt)))) ) 
 		{
+			assert(is_free(right_block(mt)));
 			delete_node(right_block(mt), false);
 			right_f = true;
 		}
 	pthread_mutex_unlock(&arr_mutex[right_idx]);
-
+	if (right_f)
+		assert(!is_free(right_block(mt)));
+	if (left_f)
+		assert(!is_free(left_block(mt)));
 	if (!left_f && !right_f) {
 		assert(!is_free(mt));
-	    add_node(mt, false);
-		// pthread_mutex_unlock(&arr_mutex[array_idx(meta_size(mt))]);
+	    add_node(mt, true);
 	}
 	else if (left_f && !right_f) {
-		int left_size = meta_size(left_block(mt));
+		// int left_size =/ meta_size(left_block(mt));
 		int new_size = left_size + FOOTER_SIZE + META_SIZE + meta_size(mt);
 		pthread_mutex_lock(&arr_mutex[array_idx(new_size)]);
 			set_alloc(left_block(mt));
 			set_size(left_block(mt), new_size);
 			set_alloc((metadata_t *)to_footer(ptr));
 			set_size((metadata_t *)to_footer(ptr), new_size);
+			assert(!is_free(left_block(mt)));
 			add_node(left_block(mt), false);
 		pthread_mutex_unlock(&arr_mutex[array_idx(new_size)]);
 	}
 	else if (!left_f && right_f) {
-		int right_size = meta_size(right_block(mt));
+		// int right_size = meta_size(right_block(mt));
 		int new_size = right_size + meta_size(mt) + FOOTER_SIZE + META_SIZE;
 		pthread_mutex_lock(&arr_mutex[array_idx(new_size)]);
 			set_alloc(mt);
 			set_size(mt, new_size);
 			set_alloc((metadata_t *)to_footer(to_block(mt)));
 			set_size((metadata_t *)to_footer(to_block(mt)), new_size);
+			assert(!is_free(mt));
 			add_node(mt, false);
 		pthread_mutex_unlock(&arr_mutex[array_idx(new_size)]);
 	}
@@ -381,6 +406,7 @@ void dfree(void* ptr) {
 			set_alloc((metadata_t *)to_footer(to_block(right_block(mt))));
 			set_size(left_block(mt), new_size);
 			set_alloc(left_block(mt));	
+			assert(!is_free(left_block(mt)));
 			add_node(left_block(mt), false);
 		pthread_mutex_unlock(&arr_mutex[array_idx(new_size)]);
 	}

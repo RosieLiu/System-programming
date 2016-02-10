@@ -79,7 +79,9 @@ int main(int argc, char *argv[])
   for (i=0; i < NUM_THREADS; i++) {
     pthread_join(threads[i], NULL);
   } //for i
+  printf("Before checking the overlap\n");
 
+// /*
   //Check for correctness!
 
   int *start, *end, *tgt_start, *tgt_end;
@@ -104,8 +106,6 @@ int main(int argc, char *argv[])
     if (fail == 1) break;
   } //for i
 
-  printf("Before checking the overlap\n");
-
 
   if (fail == 0) {
     printf("No overlapping allocated regions found!\n");
@@ -116,12 +116,15 @@ int main(int argc, char *argv[])
     printf("Region 2 bounds: start=%zu, end=%zu, size=%zuB, idx=%d\n", (size_t)tgt_start, (size_t)tgt_end, (size_t)malloc_items[j].bytes, j);
     printf("Test failed\n");
   } //else
+  
+  // */
 
   for (i=0; i < NUM_THREADS * NUM_ITEMS; i++) {
     if (malloc_items[i].free == 0) {
       FREE(malloc_items[i].address);
     } //if
   } //for i
+
 
   return 0;
 }
