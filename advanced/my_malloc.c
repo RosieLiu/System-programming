@@ -255,6 +255,9 @@ metadata_t * extend_heap(size_t space) {
 		return NULL;
 	}
 	metadata_t *epilogue = to_meta(last_brk + space_a);
+	epilogue->prev = NULL;
+	epilogue->next = NULL;
+	set_alloc(epilogue);
 	metadata_t *start = to_meta(last_brk);
 	start->prev = NULL;
 	start->next = NULL;
@@ -263,9 +266,22 @@ metadata_t * extend_heap(size_t space) {
 	footer_t *end = to_footer(to_block(start));
 	set_free((metadata_t *)end);
 	set_size((metadata_t *)end, space_a - META_SIZE - FOOTER_SIZE);
-	epilogue->prev = NULL;
-	epilogue->next = NULL;
-	set_alloc(epilogue);
+	//add_node(start);
+	bool left_f = is_free((metadata_t *)((void *)start - FOOTER_SIZE));
+	if (left_f) {
+		//process the linked list
+		//change the size of two blocks
+		void *ptr = to_block(start);
+		delete_node(to_meta(left_block(ptr)));
+		int left_size = block_size(left_block(ptr));
+		int new_size = left_size + FOOTER_SIZE + META_SIZE + block_size(ptr);
+		set_size(to_meta(left_block(ptr)), new_size);
+		set_size((metadata_t *)to_footer(ptr), new_size);
+		set_free(to_meta(left_block(ptr)));
+		set_free((metadata_t *)to_footer(ptr));
+		start = to_meta(left_block(ptr));
+		// add_node(to_meta(left_block(ptr)));
+	}
 	add_node(start);
 	return start;
 }

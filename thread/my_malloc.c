@@ -2,6 +2,7 @@
 #include <unistd.h> //needed for sbrk
 #include <assert.h> //For asserts
 #include <errno.h> // for sbrk error detection
+#include <pthread.h> //for mutex
 
 #include "my_malloc.h"
 
@@ -28,27 +29,30 @@ typedef struct footer {
 static metadata_t* freelist_arr[ARRAY_SIZE] = {ARRAY_INIT, ARRAY_INIT};
 static bool is_init = false;
 static void * heap_begin;
+static pthread_mutex_t init_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t arr_mutex[ARRAY_SIZE];
+static pthread_mutex_t sbrk_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int extend_times = 0;
 
 metadata_t * to_meta(void *bp);
 footer_t * to_footer(void *bp);
 void * to_block(metadata_t* mt);
 void * meta_addr(void *bp);
 size_t meta_size(metadata_t *mt);
-size_t footer_size(footer_t *ft);
 size_t block_size(void *bp);
-void * left_block(void *bp);
-void * right_block(void *bp);
+metadata_t * left_block(metadata_t *bp);
+metadata_t * right_block(metadata_t *bp);
 bool is_free(metadata_t *mt);
 void set_free(metadata_t *mt);
 void set_alloc(metadata_t *mt);
 void set_size(metadata_t *mt, size_t s);
-void delete_node(metadata_t *node);
-void add_node(metadata_t *node);
-metadata_t * find_fit(size_t space, int flag);//true: first fit, false: best fit
+void delete_node(metadata_t *node, bool need_lock);
+void add_node(metadata_t *node, bool need_lock);
+metadata_t * find_fit(size_t space);//true: first fit, false: best fit
 int array_idx(size_t space);
 metadata_t * extend_heap(size_t space);
-void *dmalloc(size_t numbytes, int flag);
-void dfree(void *bp, int flag);
+void *dmalloc(size_t numbytes);
+void dfree(void *bp);
 
 
 inline metadata_t * to_meta(void *bp) {
@@ -71,20 +75,18 @@ inline size_t meta_size(metadata_t *mt) {
 	return mt->size & (~0x07);
 }
 
-inline size_t footer_size(footer_t *ft) {
-	return ft->size & (~0x07);
-}
-
 inline size_t block_size(void *bp) {
 	return meta_size(to_meta(bp));
 }
 
-inline void * left_block(void *bp) {
-	return (void *)(meta_addr(bp) - FOOTER_SIZE - footer_size((footer_t *)(meta_addr(bp) - FOOTER_SIZE)));
+inline metadata_t * left_block(metadata_t *mt) {
+	// return (void *)(meta_addr(bp) - FOOTER_SIZE - footer_size((footer_t *)(meta_addr(bp) - FOOTER_SIZE)));
+	return (metadata_t *)((void *)mt - FOOTER_SIZE - meta_size((metadata_t *)((void *)mt - FOOTER_SIZE)) - META_SIZE);
 }
 
-inline void * right_block(void *bp) {
-	return (void *)(bp + block_size(bp) + FOOTER_SIZE + META_SIZE);
+inline metadata_t * right_block(metadata_t *mt) {
+	// return (void *)(bp + block_size(bp) + FOOTER_SIZE + META_SIZE);
+	return (metadata_t *)((void *)mt + META_SIZE + meta_size(mt) + FOOTER_SIZE);
 }
 
 inline bool is_free(metadata_t *mt) {
@@ -114,14 +116,13 @@ inline void set_size(metadata_t *mt, size_t s) {
 	}
 }
 
-inline void set_footer_size(metadata_t *mt, size_t s) {
-	footer_t* ft = (footer_t *) ((void *)(mt) + META_SIZE + meta_size(mt) + FOOTER_SIZE);
-	ft->size = s;
-}
-
-void delete_node(metadata_t *node) {
+void delete_node(metadata_t *node, bool need_lock) {
+	assert(is_free(node));
 	size_t space = meta_size(node);
 	int idx = array_idx(space);
+	if (need_lock) {
+		pthread_mutex_lock(&arr_mutex[idx]);
+	}
 	if (!node->prev && !node->next) {
 		freelist_arr[idx] = NULL;
 	}
@@ -140,10 +141,20 @@ void delete_node(metadata_t *node) {
 		node->prev = NULL;
 		node->next = NULL;
 	}
+	set_alloc(node);
+	set_alloc((metadata_t *)to_footer(to_block(node)));
+	if (need_lock) {
+		pthread_mutex_unlock(&arr_mutex[idx]);
+	}
+	assert(!is_free(node));
 }
 
-void add_node(metadata_t *node) {
+void add_node(metadata_t *node, bool need_lock) {
+	assert(!is_free(node));
 	int idx = array_idx(meta_size(node));
+	if (need_lock) {
+		pthread_mutex_lock(&arr_mutex[idx]);
+	}
 	if (!freelist_arr[idx]) {
 		freelist_arr[idx] = node;
 		node->prev = NULL;
@@ -155,60 +166,50 @@ void add_node(metadata_t *node) {
 		freelist_arr[idx]->prev = node;
 		freelist_arr[idx] = node;
 	}
+	set_free(node);
+	set_free((metadata_t *)to_footer(to_block(node)));
+	if (need_lock) {
+		pthread_mutex_unlock(&arr_mutex[idx]);
+	}
+	assert(is_free(node));
 }
 
-metadata_t * find_fit(size_t space, int flag) {
+metadata_t * find_fit(size_t space) {
     int idx = array_idx(space);
     metadata_t *flpt = NULL;
-    if (flag == FF) {
-		while (idx < ARRAY_SIZE) {
-			flpt = freelist_arr[idx];
-			while (flpt) {
-				if (meta_size(flpt) < space) {
-					flpt = flpt->next;
-				}
-				else {
-					return flpt;
-				}
+	size_t redundant = ~(size_t)0x00;
+	metadata_t *result = NULL;
+	while (idx < ARRAY_SIZE) {
+		pthread_mutex_lock(&arr_mutex[idx]);
+		flpt = freelist_arr[idx];
+		while (flpt) {
+			if (meta_size(flpt) == space) {
+				result = flpt;
+				break;
 			}
-			idx++;
-		}
-		return NULL;
-    }
-    else if (flag == BF) {
-    	size_t redundant = ~(size_t)0x00;
-    	metadata_t *result = NULL;
-    	while (idx < ARRAY_SIZE && result == NULL) {
-    		flpt = freelist_arr[idx];
-    		while (flpt) {
-    			if (meta_size(flpt) == space) {
-    				return flpt;
-    			}
-    			else if (meta_size(flpt) > space && redundant > meta_size(flpt) - space) {
-    				result = flpt;
-    				redundant = meta_size(flpt) - space;			
-    			}
-    			flpt = flpt->next;
-    		}
-    		idx++;
-    	}
-    	return result;
-    }
-    else if (flag == WF) {
-		metadata_t *result = NULL;
-		int i = ARRAY_SIZE - 1;
-		for (; i >= idx && !result; i--) {
-			flpt = freelist_arr[i];
-			while (flpt && !result) {
-				if (meta_size(flpt) > space) {
-					result = flpt;
-				}
-				flpt = flpt->next;
+			else if (meta_size(flpt) > space && redundant > meta_size(flpt) - space) {
+				result = flpt;
+				redundant = meta_size(flpt) - space;
 			}
+			flpt = flpt->next;
 		}
-		return result;
+		if (result != NULL) {
+			break;
+		}
+		pthread_mutex_unlock(&arr_mutex[idx]);
+		idx++;
 	}
-    return NULL;
+	if (result) {
+		delete_node(result, false);
+		pthread_mutex_unlock(&(arr_mutex[idx]));
+	}
+	else {
+		if (!(result = extend_heap(space))) {
+			printf("extend heap failed! \n");
+			return NULL;
+		}
+	}
+	return result;
 }
 
 int array_idx(size_t space) {
@@ -232,17 +233,11 @@ int array_idx(size_t space) {
     return result;
 }
 
-void *ff_malloc(size_t numbytes) {
-	return dmalloc(numbytes, FF);
+
+void *ts_malloc(size_t numbytes) {
+	return dmalloc(numbytes);
 }
 
-void *bf_malloc(size_t numbytes) {
-	return dmalloc(numbytes, BF);
-}
-
-void *wf_malloc(size_t numbytes) {
-	return dmalloc(numbytes, WF);
-}
 
 metadata_t * extend_heap(size_t space) {
 	int numchunk = (space + META_SIZE + FOOTER_SIZE) / CHUNK_SIZE;
@@ -250,28 +245,43 @@ metadata_t * extend_heap(size_t space) {
 		numchunk += 1;
 	}
 	size_t space_a = numchunk * CHUNK_SIZE;
-	void *last_brk = sbrk(space_a);
-	if (errno == ENOMEM) {
-		printf("no room for extending heap\n");
-		return NULL;
-	}
-	metadata_t *epilogue = to_meta(last_brk + space_a);
-	metadata_t *start = to_meta(last_brk);
-	start->prev = NULL;
-	start->next = NULL;
-	set_free(start);
-	set_size(start, space_a - META_SIZE - FOOTER_SIZE);
-	footer_t *end = to_footer(to_block(start));
-	set_free((metadata_t *)end);
-	set_size((metadata_t *)end, space_a - META_SIZE - FOOTER_SIZE);
-	epilogue->prev = NULL;
-	epilogue->next = NULL;
-	set_alloc(epilogue);
-	add_node(start);
-	return start;
+	pthread_mutex_lock(&sbrk_mutex);
+		void *last_brk = sbrk(space_a);
+		if (errno == ENOMEM) {
+			printf("no room for extending heap\n");
+			pthread_mutex_unlock(&sbrk_mutex);
+			return NULL;
+		}
+		metadata_t *epilogue = to_meta(last_brk + space_a);
+		epilogue->prev = NULL;
+		epilogue->next = NULL;
+		set_alloc(epilogue);
+		// should coalesce but not
+		metadata_t *start1 = to_meta(last_brk);
+		start1->prev = NULL;
+		start1->next = NULL;
+		set_alloc(start1);
+		set_size(start1, space);
+		footer_t *end1 = to_footer(to_block(start1));
+		set_alloc((metadata_t *)end1);
+		set_size((metadata_t *)end1, space);
+	
+		size_t space2 = space_a - 2*META_SIZE - 2*FOOTER_SIZE - space;
+		metadata_t *start2 = (void *)end1 + FOOTER_SIZE;
+		start2->prev = NULL;
+		start2->next = NULL;
+		set_alloc(start2);
+		set_size(start2, space2);
+		footer_t *end2 = to_footer(to_block(start2));
+		set_alloc((metadata_t *)end2);
+		set_size((metadata_t *)end2, space2);
+		add_node(start2, true);
+		extend_times += 1;
+	pthread_mutex_unlock(&sbrk_mutex);
+	return start1;
 }
 
-void* dmalloc(size_t numbytes, int flag) {
+void* dmalloc(size_t numbytes) {
 	if(!is_init) { 			//Initialize through sbrk call first time
 		if(!dmalloc_init()) {
 			return NULL;
@@ -280,131 +290,131 @@ void* dmalloc(size_t numbytes, int flag) {
 
 	assert(numbytes > 0);
 
-	/* Your code goes here */
 	size_t space = ALIGN(numbytes);
-	// go over the linked list, find the first fit
-	//metadata_t* flpt = freelist;
-	metadata_t* flpt = find_fit(space, flag);
-	if (!flpt) {
-		//return NULL;
-		if (!(flpt = extend_heap(space))) {
-			printf("extend heap failed! \n");
-			return NULL;
-		}
-	}
+	metadata_t* flpt = find_fit(space);
 	size_t rest = meta_size(flpt) - space;
-	delete_node(flpt);
 	if (rest < ALIGN(META_SIZE + FOOTER_SIZE + 1)) {
-		set_alloc(flpt);
-		set_alloc((metadata_t *)(to_footer(to_block(flpt))));
+		assert(!is_free(flpt));
 	}
 	else {
 		rest = rest - META_SIZE - FOOTER_SIZE;
-		set_size(flpt, space);
-		set_alloc(flpt);
-		set_size((metadata_t *)(to_footer(to_block(flpt))), space);
-		set_alloc((metadata_t *)(to_footer(to_block(flpt))));
-		metadata_t* newmt = (metadata_t *)((void *)flpt + META_SIZE + space + FOOTER_SIZE);
-		set_size(newmt, rest);
-		set_free(newmt);
-		set_size((metadata_t *)to_footer(to_block(newmt)), rest);
-		set_free((metadata_t *)to_footer(to_block(newmt)));
-		add_node(newmt);
+		pthread_mutex_lock(&arr_mutex[array_idx(space)]); 
+			set_size(flpt, space);
+			set_alloc(flpt);
+			set_size((metadata_t *)(to_footer(to_block(flpt))), space);
+			set_alloc((metadata_t *)(to_footer(to_block(flpt))));
+			metadata_t* newmt = (metadata_t *)((void *)flpt + META_SIZE + space + FOOTER_SIZE);
+		pthread_mutex_unlock(&arr_mutex[array_idx(space)]);
+
+		pthread_mutex_lock(&arr_mutex[array_idx(rest)]); 
+			set_size(newmt, rest);
+			set_alloc(newmt);
+			set_size((metadata_t *)to_footer(to_block(newmt)), rest);
+			set_alloc((metadata_t *)to_footer(to_block(newmt)));
+			add_node(newmt, false);
+		pthread_mutex_unlock(&arr_mutex[array_idx(rest)]);
 	}
 	return to_block(flpt);
 }
 
 
-
-void ff_free(void* ptr) {
-	dfree(ptr, FF);
+void ts_free(void* ptr) {
+	dfree(ptr);
 }
 
-void bf_free(void* ptr) {
-	dfree(ptr, BF);
-}
+void dfree(void* ptr) {
+	bool right_f = false, left_f = false;
+	metadata_t *mt = to_meta(ptr);
+	assert(!is_free(mt));
+	int left_idx = array_idx(meta_size((metadata_t *)(ptr - META_SIZE - FOOTER_SIZE)));
+	pthread_mutex_lock(&arr_mutex[left_idx]); 
+		if (is_free((metadata_t *)(ptr - META_SIZE - FOOTER_SIZE)) && 
+			(left_idx == array_idx(meta_size((metadata_t *)(ptr - META_SIZE - FOOTER_SIZE))))) {
+			delete_node(left_block(mt), false);
+			left_f = true;
+		}
+	pthread_mutex_unlock(&arr_mutex[left_idx]);
 
-void wf_free(void* ptr) {
-	dfree(ptr, WF);
-}
+	int right_idx = array_idx(meta_size(right_block(mt)));
+	pthread_mutex_lock(&arr_mutex[right_idx]);
+		if (is_free(right_block(mt))
+			&& (right_idx == array_idx(meta_size(right_block(mt)))))
+		{
+			delete_node(right_block(mt), false);
+			right_f = true;
+		}
+	pthread_mutex_unlock(&arr_mutex[right_idx]);
 
-void dfree(void* ptr, int flag) {
-
-	/* Your free and coalescing code goes here */
-	//bool left_f = is_free(left_block(ptr));
-	bool right_f = is_free(to_meta(right_block(ptr)));
-	bool left_f = is_free((metadata_t *)(ptr - META_SIZE - FOOTER_SIZE));
-	
 	if (!left_f && !right_f) {
-	    set_free(to_meta(ptr));
-	    set_free((metadata_t *)to_footer(ptr));
-	    add_node(to_meta(ptr));
+		assert(!is_free(mt));
+	    add_node(mt, false);
+		// pthread_mutex_unlock(&arr_mutex[array_idx(meta_size(mt))]);
 	}
 	else if (left_f && !right_f) {
-		//process the linked list
-		//change the size of two blocks
-		delete_node(to_meta(left_block(ptr)));
-		int left_size = block_size(left_block(ptr));
-		int new_size = left_size + FOOTER_SIZE + META_SIZE + block_size(ptr);
-		set_size(to_meta(left_block(ptr)), new_size);
-		set_size((metadata_t *)to_footer(ptr), new_size);
-		set_free(to_meta(left_block(ptr)));
-		set_free((metadata_t *)to_footer(ptr));
-		add_node(to_meta(left_block(ptr)));
+		int left_size = meta_size(left_block(mt));
+		int new_size = left_size + FOOTER_SIZE + META_SIZE + meta_size(mt);
+		pthread_mutex_lock(&arr_mutex[array_idx(new_size)]);
+			set_alloc(left_block(mt));
+			set_size(left_block(mt), new_size);
+			set_alloc((metadata_t *)to_footer(ptr));
+			set_size((metadata_t *)to_footer(ptr), new_size);
+			add_node(left_block(mt), false);
+		pthread_mutex_unlock(&arr_mutex[array_idx(new_size)]);
 	}
 	else if (!left_f && right_f) {
-		//process the linked list
-		delete_node(to_meta(right_block(ptr)));
-		//change the size of two blocks
-		int right_size = block_size(right_block(ptr));
-		int new_size = right_size + block_size(ptr) + FOOTER_SIZE + META_SIZE;
-		set_size((metadata_t *)to_footer(right_block(ptr)), new_size);
-		set_free((metadata_t *)to_footer(right_block(ptr)));
-		set_size(to_meta(ptr), new_size);
-		set_free(to_meta(ptr));
-		//process the linked list
-		add_node(to_meta(ptr));
+		int right_size = meta_size(right_block(mt));
+		int new_size = right_size + meta_size(mt) + FOOTER_SIZE + META_SIZE;
+		pthread_mutex_lock(&arr_mutex[array_idx(new_size)]);
+			set_alloc(mt);
+			set_size(mt, new_size);
+			set_alloc((metadata_t *)to_footer(to_block(mt)));
+			set_size((metadata_t *)to_footer(to_block(mt)), new_size);
+			add_node(mt, false);
+		pthread_mutex_unlock(&arr_mutex[array_idx(new_size)]);
 	}
 	else if (left_f && right_f) {
-		//process the linked list
-		delete_node(to_meta(right_block(ptr)));
-		delete_node(to_meta(left_block(ptr)));
-		//change the size of two blocks
-		int right_size = block_size(right_block(ptr));
-		int left_size = block_size(left_block(ptr));
-		int new_size = block_size(ptr) + left_size + right_size + 2 * (FOOTER_SIZE + META_SIZE);
-		set_size((metadata_t *)to_footer(right_block(ptr)), new_size);
-		set_free((metadata_t *)to_footer(right_block(ptr)));
-		set_size(to_meta(left_block(ptr)), new_size);
-		set_free(to_meta(left_block(ptr)));	
-		add_node(to_meta(left_block(ptr)));
+		int right_size = meta_size(right_block(mt));
+		int left_size = meta_size(left_block(mt));
+		int new_size = meta_size(mt) + left_size + right_size + 2 * (FOOTER_SIZE + META_SIZE);
+		pthread_mutex_lock(&arr_mutex[array_idx(new_size)]);
+			set_size((metadata_t *)to_footer(to_block(right_block(mt))), new_size);
+			set_alloc((metadata_t *)to_footer(to_block(right_block(mt))));
+			set_size(left_block(mt), new_size);
+			set_alloc(left_block(mt));	
+			add_node(left_block(mt), false);
+		pthread_mutex_unlock(&arr_mutex[array_idx(new_size)]);
 	}
 }
+
 
 
 bool dmalloc_init() {
-
-	/* Two choices: 
- 	* 1. Append prologue and epilogue blocks to the start and the end of the freelist
- 	* 2. Initialize freelist pointers to NULL
- 	*
- 	* Note: We provide the code for 2. Using 1 will help you to tackle the
- 	* corner cases succinctly.
- 	*/
  	
- 	is_init = true;
+	pthread_mutex_lock(&init_mutex);
+	if (is_init) {
+		pthread_mutex_unlock(&init_mutex);
+		return true;
+	}
+
+	int i = 0;
+	for (i = 0; i < ARRAY_SIZE; i++) {
+		pthread_mutex_init(&arr_mutex[i], NULL);
+	}
 
 	size_t max_bytes = ALIGN(MAX_HEAP_SIZE);
-	int i = 0;
+	i = 0;
+
 	for (i = 0; i < ARRAY_SIZE; i++) {
 	    freelist_arr[i] = NULL;
 	}
-	
+
 	metadata_t *fl = (metadata_t*) sbrk(max_bytes); // returns heap_region, which is initialized to freelist
 	heap_begin = fl;
 	/* Q: Why casting is used? i.e., why (void*)-1? */
-	if (fl == (void *)-1)
+	if (fl == (void *)-1){
+		pthread_mutex_unlock(&init_mutex);
 		return false;
+	}
 	//prologue block
 	footer_t* prologue = (footer_t *)fl;
 	set_size((metadata_t *)prologue, 0);
@@ -416,12 +426,15 @@ bool dmalloc_init() {
 	//freelist
 	fl = (metadata_t *)((void *)fl + FOOTER_SIZE);
 	set_size(fl, max_bytes - 2 * META_SIZE - 2 * FOOTER_SIZE);
-	set_free(fl);
+	set_alloc(fl);
 	set_size((metadata_t *)to_footer(to_block(fl)), meta_size(fl));	
-	set_free((metadata_t *)to_footer(to_block(fl)));
+	set_alloc((metadata_t *)to_footer(to_block(fl)));
 	fl->next = NULL;
 	fl->prev = NULL;
-	add_node(fl);
+	add_node(fl, true);
+	//set the initial flag
+	is_init = true;
+	pthread_mutex_unlock(&init_mutex);
 	return true;
 }
 

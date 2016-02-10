@@ -1,6 +1,6 @@
 #ifndef __CPS210_MM_H__ 	/* check if this header file is already defined elsewhere */
 #define __CPS210_MM_H__
-#include <stddef.h>
+//#include <stddef.h>
 
 /* You do not need to change MAX_HEAP_SIZE 
  */
@@ -34,14 +34,14 @@
 typedef enum{false, true} bool;
 
 bool dmalloc_init();
-void *dmalloc(size_t numbytes, int flag);
-void *ff_malloc(size_t numbytes);
-void *bf_malloc(size_t numbytes);
-void *wf_malloc(size_t numbytes);
+void *dmalloc(size_t numbytes);
+// void *ff_malloc(size_t numbytes);
+// void *bf_malloc(size_t numbytes);
+// void *wf_malloc(size_t numbytes);
 void *ts_malloc(size_t numbytes);
-void ff_free(void *allocptr);
-void bf_free(void *allocptr);
-void wf_free(void *allocptr);
+// void ff_free(void *allocptr);
+// void bf_free(void *allocptr);
+// void wf_free(void *allocptr);
 void ts_free(void *allocptr);
 unsigned long get_data_segment_size();
 unsigned long get_data_segment_free_space_size();

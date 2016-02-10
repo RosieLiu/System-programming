@@ -6,8 +6,8 @@
 #define MALLOC(sz) ts_malloc(sz)
 #define FREE(p)    ts_free(p)
 
-#define NUM_THREADS  300
-#define NUM_ITEMS    300
+#define NUM_THREADS  1000
+#define NUM_ITEMS    1000
 
 pthread_t threads[NUM_THREADS];
 int       thread_id[NUM_THREADS];
@@ -26,7 +26,7 @@ malloc_list_t malloc_items[NUM_THREADS * NUM_ITEMS];
 
 void do_allocate(int thread_id) {
   int i, index;
-  int counter = 0;
+  int counter = thread_id * NUM_ITEMS;
   int thread_start_index = thread_id * NUM_ITEMS;
 
   //Let all threads get up and running
@@ -38,12 +38,11 @@ void do_allocate(int thread_id) {
     malloc_items[index].address = (int *)MALLOC(malloc_items[index].bytes);
     malloc_items[index].free = 0;
 
-     if ((i % 2) == 0) { //Occasionally free some items 
-       printf("count:%d\n",counter);
-       FREE(malloc_items[counter+thread_start_index].address); 
-       malloc_items[counter+thread_start_index].free = 1; 
-       counter++;
-     }  //if
+    if ((i % 2) == 0) { //Occasionally free some items
+      FREE(malloc_items[counter].address);
+      malloc_items[counter].free = 1;
+      counter++;
+    } //if
   } //for i
 
   pthread_barrier_wait(&barrier);
@@ -79,7 +78,6 @@ int main(int argc, char *argv[])
 
   for (i=0; i < NUM_THREADS; i++) {
     pthread_join(threads[i], NULL);
-   // printf("join %d\n",i);
   } //for i
 
   //Check for correctness!
@@ -87,7 +85,6 @@ int main(int argc, char *argv[])
   int *start, *end, *tgt_start, *tgt_end;
   int fail = 0;
   for (i=0; i < NUM_THREADS * NUM_ITEMS; i++) {
-    //printf("i:%d\n",i);
     if (malloc_items[i].free == 1) continue;
     start = malloc_items[i].address;
     end   = start + (malloc_items[i].bytes / sizeof(int));
@@ -107,6 +104,9 @@ int main(int argc, char *argv[])
     if (fail == 1) break;
   } //for i
 
+  printf("Before checking the overlap\n");
+
+
   if (fail == 0) {
     printf("No overlapping allocated regions found!\n");
     printf("Test passed\n");
@@ -117,14 +117,11 @@ int main(int argc, char *argv[])
     printf("Test failed\n");
   } //else
 
-
-  
   for (i=0; i < NUM_THREADS * NUM_ITEMS; i++) {
-    if(malloc_items[i].free == 1)
-        continue;
-    FREE(malloc_items[i].address);
+    if (malloc_items[i].free == 0) {
+      FREE(malloc_items[i].address);
+    } //if
   } //for i
-  
 
   return 0;
 }

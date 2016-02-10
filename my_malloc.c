@@ -1,37 +1,32 @@
 #include <stdio.h> //needed for size_t
 #include <unistd.h> //needed for sbrk
 #include <assert.h> //For asserts
+#include <errno.h> // for sbrk error detection
 #include "my_malloc.h"
 
 
 #define META_SIZE       (ALIGN(sizeof(metadata_t)))
 #define FOOTER_SIZE     (ALIGN(sizeof(footer_t)))
-#define ARRAY_SIZE      (30)
+#define ARRAY_SIZE      (60)
 #define ARRAY_INIT		NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL
-#define CHUNK_SIZE   128
-#define FF			 1
-#define BF			 2
-#define WF			 3
+#define CHUNK_SIZE   (1024*4)
+#define FF			 (1)
+#define BF			 (2)
+#define WF			 (3)
 
 typedef struct metadata {
-       /* size_t is the return type of the sizeof operator. Since the size of
- 	* an object depends on the architecture and its implementation, size_t 
-	* is used to represent the maximum size of any object in the particular
- 	* implementation. 
-	* size contains the size of the data object or the amount of free
- 	* bytes 
-	*/
-	size_t size; //always ends
+	size_t size; 
 	struct metadata* next;
-	struct metadata* prev; //What's the use of prev pointer?
+	struct metadata* prev; 
 } metadata_t;
 
 typedef struct footer {
     size_t size;
 } footer_t;
 
-static metadata_t* freelist_arr[ARRAY_SIZE] ={ARRAY_INIT};
+static metadata_t* freelist_arr[ARRAY_SIZE] = {ARRAY_INIT, ARRAY_INIT};
 static bool is_init = false;
+static void * heap_begin;
 
 metadata_t * to_meta(void *bp);
 footer_t * to_footer(void *bp);
@@ -50,61 +45,64 @@ void delete_node(metadata_t *node);
 void add_node(metadata_t *node);
 metadata_t * find_fit(size_t space, int flag);//true: first fit, false: best fit
 int array_idx(size_t space);
+metadata_t * extend_heap(size_t space);
+void *dmalloc(size_t numbytes, int flag);
+void dfree(void *bp, int flag);
 
 
-metadata_t * to_meta(void *bp) {
+inline metadata_t * to_meta(void *bp) {
 	return (metadata_t *)(bp - META_SIZE);
 }
 
-footer_t * to_footer(void *bp) {
+inline footer_t * to_footer(void *bp) {
 	return (footer_t *)(bp + block_size(bp));
 }
 
-void * to_block(metadata_t *mt) {
+inline void * to_block(metadata_t *mt) {
 	return (void *)(mt) + META_SIZE;
 }
 
-void * meta_addr(void *bp) {
+inline void * meta_addr(void *bp) {
 	return bp - META_SIZE;
 }
 
-size_t meta_size(metadata_t *mt) {
+inline size_t meta_size(metadata_t *mt) {
 	return mt->size & (~0x07);
 }
 
-size_t footer_size(footer_t *ft) {
+inline size_t footer_size(footer_t *ft) {
 	return ft->size & (~0x07);
 }
 
-size_t block_size(void *bp) {
+inline size_t block_size(void *bp) {
 	return meta_size(to_meta(bp));
 }
 
-void * left_block(void *bp) {
+inline void * left_block(void *bp) {
 	return (void *)(meta_addr(bp) - FOOTER_SIZE - footer_size((footer_t *)(meta_addr(bp) - FOOTER_SIZE)));
 }
 
-void * right_block(void *bp) {
+inline void * right_block(void *bp) {
 	return (void *)(bp + block_size(bp) + FOOTER_SIZE + META_SIZE);
 }
 
-bool is_free(metadata_t *mt) {
+inline bool is_free(metadata_t *mt) {
 	if (mt == NULL) {
 		return false;
 	}
 	return !(0x01 & (mt -> size)); 
 }
 
-void set_free(metadata_t *mt) {
+inline void set_free(metadata_t *mt) {
 	mt -> size &= ~0x01; //1: alloc  0: free
 }
 
-void set_alloc(metadata_t *mt) {
+inline void set_alloc(metadata_t *mt) {
 	mt -> size |= 0x01;  //1: alloc  0: free
 }
 
 
-void set_size(metadata_t *mt, size_t s) {
+inline void set_size(metadata_t *mt, size_t s) {
 	int flag = mt -> size & 0x01;
 	mt -> size = s;
 	if (flag) {
@@ -115,7 +113,7 @@ void set_size(metadata_t *mt, size_t s) {
 	}
 }
 
-void set_footer_size(metadata_t *mt, size_t s) {
+inline void set_footer_size(metadata_t *mt, size_t s) {
 	footer_t* ft = (footer_t *) ((void *)(mt) + META_SIZE + meta_size(mt) + FOOTER_SIZE);
 	ft->size = s;
 }
@@ -161,24 +159,59 @@ void add_node(metadata_t *node) {
 metadata_t * find_fit(size_t space, int flag) {
     int idx = array_idx(space);
     metadata_t *flpt = NULL;
-    //metadata_t *result = NULL;
-    while (idx < ARRAY_SIZE) {
-    	flpt = freelist_arr[idx];
-		while (flpt) {
-			if (meta_size(flpt) < space) {
+    if (flag == FF) {
+		while (idx < ARRAY_SIZE) {
+			flpt = freelist_arr[idx];
+			while (flpt) {
+				if (meta_size(flpt) < space) {
+					flpt = flpt->next;
+				}
+				else {
+					return flpt;
+				}
+			}
+			idx++;
+		}
+		return NULL;
+    }
+    else if (flag == BF) {
+    	size_t redundant = ~(size_t)0x00;
+    	metadata_t *result = NULL;
+    	while (idx < ARRAY_SIZE && result == NULL) {
+    		flpt = freelist_arr[idx];
+    		while (flpt) {
+    			if (meta_size(flpt) == space) {
+    				return flpt;
+    			}
+    			else if (meta_size(flpt) > space && redundant > meta_size(flpt) - space) {
+    				result = flpt;
+    				redundant = meta_size(flpt) - space;			
+    			}
+    			flpt = flpt->next;
+    		}
+    		idx++;
+    	}
+    	return result;
+    }
+    else if (flag == WF) {
+		metadata_t *result = NULL;
+		int i = ARRAY_SIZE - 1;
+		for (; i >= idx && !result; i--) {
+			flpt = freelist_arr[i];
+			while (flpt && !result) {
+				if (meta_size(flpt) > space) {
+					result = flpt;
+				}
 				flpt = flpt->next;
 			}
-			else {
-				return flpt;
-			}
 		}
-		idx++;
-    }
+		return result;
+	}
     return NULL;
 }
 
 int array_idx(size_t space) {
-	int s = space / 8;
+	int s = space >> 3;
 	int result = 0;
 	int i = 0;
     switch(s) {
@@ -189,13 +222,11 @@ int array_idx(size_t space) {
     		result = (s - 1);
     		break;
     	default:
-    		//int i = 0;
-    		for (i = 0; i < 32; i++) {
-    			if ((0x01 << i) & s) {
-    				result = i;
-    			}
-    		}
-    		result++;
+			result = 0;
+			while (s) {
+				result += 1;
+				s >>= 1;
+			}
     }
     return result;
 }
@@ -210,6 +241,33 @@ void *bf_malloc(size_t numbytes) {
 
 void *wf_malloc(size_t numbytes) {
 	return dmalloc(numbytes, WF);
+}
+
+metadata_t * extend_heap(size_t space) {
+	int numchunk = (space + META_SIZE + FOOTER_SIZE) / CHUNK_SIZE;
+	if ((space + META_SIZE + FOOTER_SIZE) % CHUNK_SIZE > 0) {
+		numchunk += 1;
+	}
+	size_t space_a = numchunk * CHUNK_SIZE;
+	void *last_brk = sbrk(space_a);
+	if (errno == ENOMEM) {
+		printf("no room for extending heap\n");
+		return NULL;
+	}
+	metadata_t *epilogue = to_meta(last_brk + space_a);
+	metadata_t *start = to_meta(last_brk);
+	start->prev = NULL;
+	start->next = NULL;
+	set_free(start);
+	set_size(start, space_a - META_SIZE - FOOTER_SIZE);
+	footer_t *end = to_footer(to_block(start));
+	set_free((metadata_t *)end);
+	set_size((metadata_t *)end, space_a - META_SIZE - FOOTER_SIZE);
+	epilogue->prev = NULL;
+	epilogue->next = NULL;
+	set_alloc(epilogue);
+	add_node(start);
+	return start;
 }
 
 void* dmalloc(size_t numbytes, int flag) {
@@ -227,7 +285,11 @@ void* dmalloc(size_t numbytes, int flag) {
 	//metadata_t* flpt = freelist;
 	metadata_t* flpt = find_fit(space, flag);
 	if (!flpt) {
-		return NULL;
+		//return NULL;
+		if (!(flpt = extend_heap(space))) {
+			printf("extend heap failed! \n");
+			return NULL;
+		}
 	}
 	size_t rest = meta_size(flpt) - space;
 	delete_node(flpt);
@@ -338,6 +400,7 @@ bool dmalloc_init() {
 	}
 	
 	metadata_t *fl = (metadata_t*) sbrk(max_bytes); // returns heap_region, which is initialized to freelist
+	heap_begin = fl;
 	/* Q: Why casting is used? i.e., why (void*)-1? */
 	if (fl == (void *)-1)
 		return false;
@@ -362,26 +425,26 @@ bool dmalloc_init() {
 }
 
 
-/*Only for debugging purposes; can be turned off through -NDEBUG flag*/
-/*Old version when (!segregated)
-void print_freelist() {
-	metadata_t *freelist_head = freelist;
-	while(freelist_head != NULL) {
-		DEBUG("\tFreelist Size:%zd, Head:%p, Prev:%p, Next:%p\t",freelist_head->size,freelist_head,freelist_head->prev,freelist_head->next);
-		freelist_head = freelist_head->next;
-	}
-	DEBUG("\n");
-}
-*/
 
 unsigned long get_data_segment_size(){
-	return 0;
+	void * heap_end = sbrk(0);
+	unsigned long result = heap_end - heap_begin;
+	return result;
 }
 
 unsigned long get_data_segment_free_space_size(){
-	return 0;
+	metadata_t *head = NULL;
+	int i = 0;
+	unsigned long result = 0;
+	for (i = 0; i < ARRAY_SIZE; i++) {
+		head = freelist_arr[i];
+		while (head != NULL) {
+			result += meta_size(head);
+			head = head->next;
+		}
+	}
+	return result;
 }
-
 
 void print_freelist() {
 	metadata_t *freelist_head = NULL;
@@ -389,7 +452,8 @@ void print_freelist() {
 	for (i = 0; i < ARRAY_SIZE; i++) {
 		freelist_head = freelist_arr[i];
 		while (freelist_head != NULL) {
-			DEBUG("  Array[%d], Freelist Size:%zd, Head:%p, Prev:%p, Next:%p\t", i, freelist_head->size,freelist_head,freelist_head->prev,freelist_head->next);
+			DEBUG("  Array[%d], Freelist Size:%zd, Head:%p, Prev:%p, Next:%p\t", 
+				i, freelist_head->size,freelist_head,freelist_head->prev,freelist_head->next);
 			freelist_head = freelist_head->next;
 		}
 	}

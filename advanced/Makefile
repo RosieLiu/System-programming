@@ -1,7 +1,7 @@
 CC=gcc
 #CFLAGS=-O3 -fPIC
 CFLAGS=-fPIC
-MALLOC_VERSION=FF
+MALLOC_VERSION=BF
 WDIR=~/Desktop/ece650/heap/advanced
 LDFLAGS = -shared
 RM = rm -f
@@ -35,10 +35,8 @@ libmymalloc.so: $(OBJS)
 my_malloc.o: $(SRCS) $(HEADS) 
 	gcc -g -c -fPIC $< 
 
-
-
 clean:
-	rm -f *.so *~ *.o equal_size_allocs small_range_rand_allocs large_range_rand_allocs
+	rm -f *.so *~ *.o equal_size_allocs small_range_rand_allocs large_range_rand_allocs 
 
 clobber:
 	rm -f *~ *.o

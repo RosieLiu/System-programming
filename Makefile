@@ -1,7 +1,7 @@
 CC=gcc
 CFLAGS=-O3 -fPIC
 MALLOC_VERSION=FF
-WDIR=~/Desktop/ece650/
+WDIR=~/Desktop/ece650/heap/
 LDFLAGS = -shared
 RM = rm -f
 SRCS = my_malloc.c
@@ -19,8 +19,8 @@ mymalloc_test: mymalloc_test.c libmymalloc_SO
 ### link object file  
 libmymalloc_SO: $(OBJS) 
 	$(LD) -fPIC $(LDFLAGS) -o -g libmymalloc.so $^   
-	sudo rm /usr/lib/libmymalloc.so
-	sudo ln -s $(WDIR)/libmymalloc.so /usr/lib/libmymalloc.so
+	# sudo rm /usr/lib/libmymalloc.so
+	# sudo ln -s $(WDIR)/libmymalloc.so /usr/lib/libmymalloc.so
       
 ### compile source code
 my_malloc.o: $(SRCS) $(HEADS) 
