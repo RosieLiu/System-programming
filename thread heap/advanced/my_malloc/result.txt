@@ -1,0 +1,45 @@
+equal size alloc 
+worst fit malloc algorithm. 
+Execution Time = 58.036355 seconds
+Fragmentation  = 0.504066
+
+small size alloc 
+worst fit malloc algorithm. 
+Execution Time = 0.748064 seconds
+Fragmentation  = 0.264117
+
+large size alloc 
+worst fit malloc algorithm. 
+Execution Time = 0.987959 seconds
+Fragmentation  = 0.249876
+
+equal size alloc 
+best fit malloc algorithm. 
+Execution Time = 13.382207 seconds
+Fragmentation  = 0.511703
+
+small size alloc 
+best fit malloc algorithm. 
+Execution Time = 0.383694 seconds
+Fragmentation  = 0.154411
+
+large size alloc 
+best fit malloc algorithm. 
+Execution Time = 1.431928 seconds
+Fragmentation  = 0.040550
+
+equal size alloc 
+first fit malloc algorithm. 
+Execution Time = 13.998854 seconds
+Fragmentation  = 0.511703
+
+small size alloc 
+first fit malloc algorithm. 
+Execution Time = 0.505021 seconds
+Fragmentation  = 0.136589
+
+large size alloc 
+first fit malloc algorithm. 
+Execution Time = 1.770384 seconds
+Fragmentation  = 0.094101
+
