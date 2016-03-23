@@ -6,7 +6,7 @@
 
 #define GO '1'
 #define OVER '2'
-// #define READY '3'
+#define BYE '3'
 
 typedef struct potato {
 	char msgType;

@@ -104,31 +104,72 @@ int main(int argc, char *argv[])
  	// FD_COPY(&setRD, &setCur);
  	setCur = setRD;
 	printf("--- player %d is goint to read.\n", idx);
- 	if ((setSize = select(FD_SETSIZE, &setCur, NULL, NULL, NULL)) > 0) {
+ 	while ((setSize = select(FD_SETSIZE, &setCur, NULL, NULL, NULL)) > 0) {
  		
  		assert(setSize == 1);
 
- 		/* Get potato */
+ 		/* Get message */
  		int potatoFD = -1;
  		if (FD_ISSET(masterRD, &setCur)) {
  			potatoFD = masterRD;
-	 		printf("--- Player %d read master\n", idx);
  		}
  		if (FD_ISSET(leftRD, &setCur)) {
  			potatoFD = leftRD;
-	 		printf("--- Player %d read left\n", idx);
  		}
  		if (FD_ISSET(rightRD, &setCur)) {
  			potatoFD = rightRD;
-	 		printf("--- Player %d read right\n", idx);
  		}
 
- 		if (potatoFD != -1) {
-	 		clearString(buf);
-	 		len = read(potatoFD, (void *)potato, sizeof(potato_t));
-	 		printf("--- Player %d read len = %zu \nget a potato with %d hops\n", idx, len, potato->hopCount);
-	 		potato->hopCount--;
+ 		if (potatoFD == -1) {
+ 			continue;
  		}
+
+ 		clearString(buf);
+ 		len = read(potatoFD, (void *)potato, sizeof(potato_t));
+
+		/* Exit */
+ 		if (len < sizeof(potato_t)) {
+ 			assert(strcmp((char *)potato, "exit") == 0);
+ 			printf("--- Player %d exits\n", idx);
+ 			break;
+ 		}
+
+		if (potato->msgType == GO){
+	 		/* Get potato */
+	 		printf("--- Player %d read len = %zu \nget a potato with %d hops\n", idx, len, potato->hopCount);
+	 		potato->hop_trace[potato->totalHops - potato->hopCount] = idx;
+	 		potato->hopCount--;
+	
+	 		/* Transfer potato */
+	 		if (potato->hopCount == 0) {
+			 	srand((unsigned int) time(NULL));
+				int random = rand() % 2;
+				int nextFD = -1;
+				if (random == 0) {
+					nextFD = leftWR;
+					printf("--- Sending potato to %d", (idx-1+numPlayers)%numPlayers);
+				}
+				else if (random == 1) {
+					nextFD = rightWR;
+					printf("--- Sending potato to %d", (idx+1)%numPlayers);
+				}
+				write(nextFD, (void *)potato, sizeof(potato_t));
+	 		}
+	 		/* I'm it */
+	 		else {
+	 			potato->msgType = OVER;
+	 			len = write(masterWR, (void *)potato, sizeof(potato_t));
+	 			assert(len == sizeof(potato_t));
+	 			printf("--- I'm it");
+	
+	 		}
+	 	}
+	 	else if (potato->msgType == OVER) {
+	 		printf("Player %d exit itself\n", idx);
+	 		potato->msgType = BYE;
+	 		write(masterWR, (void *)potato, sizeof(potato_t));
+	 		break;
+	 	}
  	}
 
  	close(masterRD);

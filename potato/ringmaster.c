@@ -74,7 +74,6 @@ int main(int argc, char *argv[])
 		clearString(fifoName);
 		sprintf(fifoName, "%smaster_p%d", LOC, i);
 		fdWR[i] = open(fifoName, O_WRONLY);
-		// printf("master write %d to player %d\n", fdWR[i], i);
 
 		/* Broadcast number of players */
 		clearString(buf);
@@ -106,14 +105,35 @@ int main(int argc, char *argv[])
  	srand((unsigned int) time(NULL));
 	int random = rand() % numPlayers;
 	printf("Send a potato with %d hops\n", potato->hopCount);
-	len = write(fdWR[2], (void *)potato, sizeof(potato_t));
-	// len = write(fdWR[random], (void *)potato, sizeof(potato_t));
+	len = write(fdWR[random], (void *)potato, sizeof(potato_t));
 	assert(len == sizeof(potato_t));
 	printf("All players present, sending potato to player %d\n", random);
 
+	/* Game over */
+	setCur = setRD;
+	int final = -1;
+	if ((setSize = select(FD_SETSIZE, &setCur, NULL, NULL, NULL)) > 0) {
+		assert(setSize == 1);
+		for (i = 0; i < numPlayers; i++) {
+			if (FD_ISSET(i, &setCur)) {
+				final = i;
+				len = read(fdRD[i], potato, sizeof(potato_t));
+				assert(len == sizeof(potato_t));
+				assert(potato->hopCount == 0);
+			}
+		}
+	}
+	printf("Trace of potato:\n");
+	for (i = 0; i < numHops; i++) {
+		printf("%lu,", potato->hop_trace[i]);
+	}
+	printf("\n");
 
-	/* Clear FIFOs */
+	/* Kill players, Clear FIFOs */
 	for (i = 0; i < numPlayers; i++) {
+		potato->msgType = OVER;
+		len = read(fdRD[i], (void *)potato, sizeof(potato_t));
+		assert(len == sizeof(potato_t) && potato->msgType == BYE);
 		sprintf(fifoName, "%smaster_p%d", LOC, i);
 		unlink(fifoName);
 		sprintf(fifoName, "%sp%d_master", LOC, i);
