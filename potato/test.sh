@@ -1,7 +1,7 @@
 #! /bin/bash
 
-NUM_PLAYERS=3
-NUM_HOPS=2
+NUM_PLAYERS=500
+NUM_HOPS=500
 
 ./ringmaster $NUM_PLAYERS $NUM_HOPS &
 # ./ringmaster 1 2 &

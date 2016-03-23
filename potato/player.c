@@ -40,13 +40,11 @@ int main(int argc, char *argv[])
  	int setSize = 0;
 
 	/* Read number of players */
-	clearString(buf);
-	len = read(masterRD, buf, BUFF_LEN);
-	numPlayers = atoi(buf);
- 	printf("--- Connected as player %d out of %d total players\n", idx, numPlayers);
+	len = read(masterRD, &numPlayers, sizeof(int));
  	clearString(buf);
  	sprintf(buf, "ready");
  	len = write(masterWR, buf, BUFF_LEN);
+ 	printf("--- Connected as player %d out of %d total players\n", idx, numPlayers);
 
 	/* Initialize relevant FDs */
 	int leftRD = -1, rightRD = -1, leftWR = -1, rightWR = -1;
@@ -85,8 +83,6 @@ int main(int argc, char *argv[])
 	 	rightWR = open(fifoName, O_WRONLY);
  	}
 
- 	printf("--- No deadlock\n");
- 	
  	FD_SET(leftRD, &setRD);
  	FD_SET(rightRD, &setRD);
  	FD_SET(masterRD, &setRD);
@@ -98,76 +94,91 @@ int main(int argc, char *argv[])
 	/* Get potato from master or neighbor players */
  	potato_t realPotato;
  	potato_t *potato = &realPotato;
- 	// potato_t *potato = malloc(sizeof(potato_t));
- 	// memset((void *)potato, 0, sizeof(potato_t));
-
- 	// FD_COPY(&setRD, &setCur);
  	setCur = setRD;
-	printf("--- player %d is goint to read.\n", idx);
+ 	srand((unsigned int) time(NULL));
  	while ((setSize = select(FD_SETSIZE, &setCur, NULL, NULL, NULL)) > 0) {
  		
- 		assert(setSize == 1);
+ 		printf("--- player %d\n", idx);
+
+ 		if (setSize != 1) {
+ 			printf("--- set size = %d\n", setSize);
+ 		}
 
  		/* Get message */
  		int potatoFD = -1;
  		if (FD_ISSET(masterRD, &setCur)) {
  			potatoFD = masterRD;
+ 			len = read(potatoFD, (void *)potato, sizeof(potato_t));
+ 			printf("--- from master read %zu\n", len);
  		}
- 		if (FD_ISSET(leftRD, &setCur)) {
+ 		else if (FD_ISSET(leftRD, &setCur)) {
  			potatoFD = leftRD;
+ 			len = read(potatoFD, (void *)potato, sizeof(potato_t));
+ 			printf("--- from left read %zu\n", len);
  		}
- 		if (FD_ISSET(rightRD, &setCur)) {
+ 		else if (FD_ISSET(rightRD, &setCur)) {
  			potatoFD = rightRD;
+ 			len = read(potatoFD, (void *)potato, sizeof(potato_t));
+ 			printf("--- from right read %zu\n", len);
  		}
 
  		if (potatoFD == -1) {
+ 			printf("--- continue\n");
  			continue;
  		}
 
- 		clearString(buf);
- 		len = read(potatoFD, (void *)potato, sizeof(potato_t));
 
 		/* Exit */
- 		if (len < sizeof(potato_t)) {
- 			assert(strcmp((char *)potato, "exit") == 0);
- 			printf("--- Player %d exits\n", idx);
- 			break;
- 		}
 
 		if (potato->msgType == GO){
 	 		/* Get potato */
-	 		printf("--- Player %d read len = %zu \nget a potato with %d hops\n", idx, len, potato->hopCount);
+	 		printf("--- Player %d gets a potato with %d hops\n", idx, potato->hopCount);
 	 		potato->hop_trace[potato->totalHops - potato->hopCount] = idx;
 	 		potato->hopCount--;
 	
 	 		/* Transfer potato */
-	 		if (potato->hopCount == 0) {
-			 	srand((unsigned int) time(NULL));
-				int random = rand() % 2;
+	 		if (potato->hopCount != 0) {
+				int ran = rand() % 2;
 				int nextFD = -1;
-				if (random == 0) {
+				printf("--- random = %d\n", ran);
+				if (ran == 0) {
 					nextFD = leftWR;
-					printf("--- Sending potato to %d", (idx-1+numPlayers)%numPlayers);
+					printf("--- Sending potato to %d\n", (idx-1+numPlayers)%numPlayers);
 				}
-				else if (random == 1) {
+				else if (ran == 1) {
 					nextFD = rightWR;
-					printf("--- Sending potato to %d", (idx+1)%numPlayers);
+					printf("--- Sending potato to %d\n", (idx+1)%numPlayers);
 				}
 				write(nextFD, (void *)potato, sizeof(potato_t));
 	 		}
 	 		/* I'm it */
 	 		else {
 	 			potato->msgType = OVER;
+	 			printf("--- I'm it player %d\n", idx);
 	 			len = write(masterWR, (void *)potato, sizeof(potato_t));
 	 			assert(len == sizeof(potato_t));
-	 			printf("--- I'm it");
 	
 	 		}
 	 	}
 	 	else if (potato->msgType == OVER) {
-	 		printf("Player %d exit itself\n", idx);
-	 		potato->msgType = BYE;
-	 		write(masterWR, (void *)potato, sizeof(potato_t));
+	 		printf("--- Player %d exit itself\n", idx);
+
+	 		sprintf(fifoName, "%smaster_p%d", LOC, idx);
+	 		close(masterRD);
+			unlink(fifoName);
+
+			sprintf(fifoName, "%sp%d_master", LOC, idx);
+			close(masterWR);
+			unlink(fifoName);
+
+			close(leftRD);
+			close(leftWR);
+			close(rightRD);
+			close(rightWR);
+	 		break;
+	 	}
+	 	else {
+	 		printf("--- wrong %c\n", potato->msgType);
 	 		break;
 	 	}
  	}
